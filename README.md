@@ -5,6 +5,6 @@ This examination tool helps in collating the sequence of events between two indi
 It provides support feature for analysis of recorded movements of the user. 
 The developed tool can assist a digital forensic investigator from the following aspects:
 
-  a. Reconstruction of events using the Latitude, Longitude and date.
-  b. Authorization of victim and culprit location on the basis of their reported statements.
+  a. Reconstruction of events using the Latitude, Longitude and date information.
+  b. Authorization of victim's and culprit's location on the basis of their reported statements.
   c. Predicting the crime pattern associated with the suspect. 
