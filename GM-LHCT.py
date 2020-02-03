@@ -1,931 +1,617 @@
-import json, os, pymysql, time
-import pandas as pd
-from datetime import datetime
-from texttable import Texttable
-from tkinter import filedialog
 from tkinter import *
-import sqlite3
-import csv
-import tkinter as tk
+from tkinter import filedialog
 from tkinter import ttk
+from tkinter import messagebox
 import hashlib
-e =10**7
+import json
+from datetime import datetime
+import pandas as pd
+import sqlite3
+import re
+import gmplot
+import webbrowser
+import os
+
+conn = sqlite3.connect('database.db')
+c = conn.cursor()
 
 
-root = tk.Tk()							 #name of the window
+class FileButton:
+    def __init__(self, window, path):
+        self.window = window
+        self.path = path
+        self.frame = Frame(window.get_files_frame(), bg='#282828', bd=1)
+        self.path_label = Label(self.frame, text=path, bg='#282828', fg='#FFFFFF', padx=10, pady=10)
+        self.remove_button = Button(self.frame, text='Remove', command=self.remove, bg='#EE0000', fg='#FFFFFF',
+                                    relief=FLAT, padx=10, pady=10)
+        self.path_label.pack(side=LEFT)
+        self.remove_button.pack(side=RIGHT)
+
+    def get_frame(self):
+        return self.frame
+
+    def remove(self):
+        self.window.remove_file(self.path)
+
+
+class BrowseFiles:
+    def __init__(self, window):
+        self.window = window
+        self.nex = None
+        self.files = list()
+        self.file_buttons = list()
+        self.frame = Frame(window, bg='#1F1F1F')
+        self.files_frame = Frame(self.frame, bg='#2F2F2F')
+        Label(self.frame, text='Files', bg='#1F1F1F', fg='#FFFFFF').pack(side=TOP)
+        button_frame = Frame(self.frame)
+        add_button = Button(button_frame, command=self.add_file, text="Browse", relief=FLAT, bg='#2F2F2F', fg='#FFFFFF',
+                            pady=10, padx=10)
+        next_button = Button(button_frame, command=self.get_info, text="Next", relief=FLAT, bg='#0088DD', fg='#FFFFFF',
+                             pady=10, padx=10)
+        add_button.pack(side=LEFT, fill=X, expand=True)
+        next_button.pack(side=RIGHT, fill=X, expand=True)
+        button_frame.pack(side=BOTTOM, fill=X, anchor=S)
+        self.files_frame.pack(fill=BOTH, expand=True, padx=10, pady=10)
+
+    def get_info(self):
+        if len(self.files) < 2:
+            popup_msg("Minimum 2 files should be selected")
+            return
+
+        self.frame.pack_forget()
+
+        if self.nex is not None:
+            if self.nex.get_files() == self.files:
+                pack(self.nex)
+                return
+
+        loading = start_loading('Loading...')
+        self.window.update()
+        view_details = ViewDetails(self.window, self, list.copy(self.files))
+        self.nex = view_details
+        pack(view_details)
+        stop_loading(loading)
+
+    def add_file(self):
+        if len(self.files) == 6:
+            popup_msg("Maximum six files allowed!")
+        filename = filedialog.askopenfilename()
+        if filename != "":
+            if filename[::-1][:5] != 'nosj.':
+                popup_msg("Select a valid JSON file")
+                return
+            if filename in self.files:
+                popup_msg("File already added")
+                return
+            self.files.append(filename)
+            self.refresh_files()
+
+    def remove_file(self, path):
+        self.files.remove(path)
+        self.refresh_files()
+
+    def refresh_files(self):
+        for x in self.file_buttons:
+            x.get_frame().pack_forget()
+        self.file_buttons = list()
+        for x in self.files:
+            self.file_buttons.append(FileButton(self, x))
+            self.file_buttons[-1].get_frame().pack(anchor=N, fill=X)
+
+    def get_files_frame(self):
+        return self.files_frame
+
+    def get_frame(self):
+        return self.frame
+
+
+class Artifact:
+    def __init__(self, file_name, window):
+        self.window = window
+        self.file_name = file_name
+        self.latitude = list()
+        self.longitude = list()
+        self.time = list()
+        self.date = list()
+        self._read_file()
+        self._parse_file()
+        self._data_into_db()
+
+    def _read_file(self):
+        json_data = open(self.file_name, "rb").read()
+        self.hash = hashlib.md5(json_data).hexdigest()
+        self.json_obj = json.loads(json_data)
+
+    def _parse_file(self):
+        e = 10 ** 7
+        data = ['---', '---', '---', '---']
+        for values in self.json_obj.values():
+            for j in range(len(values)):
+                for key in values[j].keys():
+                    if key == 'latitudeE7':
+                        data[0] = values[j][key] / e
+                        self.latitude.append(data[0])
+                    if key == 'longitudeE7':
+                        data[1] = values[j][key] / e
+                        self.longitude.append(data[1])
+                    if key == 'timestampMs':
+                        date_time = str(datetime.fromtimestamp(int(values[j][key][0:-3])))
+                        data[2] = date_time[11:16]
+                        data[3] = date_time[0:10]
+                        self.time.append(data[2])
+                        self.date.append(data[3])
+
+    def update_artifact(self, new_table):
+        self.latitude = list()
+        self.longitude = list()
+        self.date = list()
+        self.time = list()
+        for group in new_table:
+            for row in group:
+                self.latitude.append(row[0])
+                self.longitude.append(row[1])
+                self.date.append(row[2])
+                self.time.append(row[3])
+            self.latitude.append(' ')
+            self.longitude.append(' ')
+            self.date.append(' ')
+            self.time.append(' ')
+        self.scrollbary.pack_forget()
+        self.tree.pack_forget()
+        self.create_frame()
+
+
+    def data_to_csv(self, path):
+        data = {
+            'Latitude': self.latitude,
+            'Longitude': self.longitude,
+            'Date': self.date,
+            'Time': self.time
+        }
+        data_frame = pd.DataFrame(data)
+        data_frame.to_csv(f"{path}.csv", index=True)
+
+    def _data_into_db(self):
+        data = {
+            'Latitude': self.latitude,
+            'Longitude': self.longitude,
+            'Date': self.date,
+            'Time': self.time
+        }
+        data_frame = pd.DataFrame(data)
+        data_frame.to_sql('t' + self.hash, conn, if_exists='replace', index=False)
+
+    def create_frame(self):
+        self.scrollbary = Scrollbar(self.window, orient=VERTICAL, )
+        self.tree = ttk.Treeview(self.window, columns=("Latitude", "Longitude", "Date", "Time"), selectmode="extended",
+                            height=14, yscrollcommand=self.scrollbary.set)
+        self.scrollbary.config(command=self.tree.yview)
+        self.scrollbary.pack(side=RIGHT, fill=Y)
+        self.tree.heading('Latitude', text="Latitude", anchor=W)
+        self.tree.heading('Longitude', text="Longitude", anchor=W)
+        self.tree.heading('Date', text="Date", anchor=W)
+        self.tree.heading('Time', text="Time", anchor=W)
+        self.tree.column('#0', stretch=NO, minwidth=0, width=25)
+        self.tree.column('#1', stretch=NO, minwidth=0, width=100)
+        self.tree.column('#2', stretch=NO, minwidth=0, width=100)
+        self.tree.column('#3', stretch=NO, minwidth=0, width=100)
+        self.tree.column('#4', stretch=NO, minwidth=0, width=100)
+        self.tree.pack()
+        for i in range(len(self.latitude)):
+            self.tree.insert("", 0, values=(self.latitude[i], self.longitude[i], self.date[i], self.time[i]))
+
+
+class Table:
+    def __init__(self, window, file_name, usernum):
+        self.frame = LabelFrame(window, text=f'User : {usernum} - {file_name}')
+        self.frame.pack(side=LEFT, padx=5, pady=5)
+        self.file_name = file_name
+        self.artifact = Artifact(self.file_name, self.frame)
+        _hash = f'File Hash : {self.artifact.hash}'
+        filehash = Entry(self.frame, relief='flat')
+        filehash.insert(0, _hash)
+        filehash.config(state='readonly')
+        filehash.pack(expand=True, fill=X)
+        self.create_artifact()
+
+    def create_artifact(self):
+        print('Creating.. ', self.file_name)
+        self.artifact.create_frame()
+        print('Done creating artifacts. ')
+
+    def get_hash(self):
+        return self.artifact.hash
+
+    def connect(self, path):
+        self.artifact.data_to_csv(path)
+        
+
+class TableView:
+    def __init__(self, window, file_names):
+        self.window = window
+        self.file_names = file_names
+        container = Frame(self.window)
+        canvas = Canvas(container, bg='#2F2F2F', height=352, width=850)
+        scrollbar = Scrollbar(container, orient="horizontal", command=canvas.xview)
+        self.frame = Frame(canvas, )
+        self.frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(
+                scrollregion=canvas.bbox("all")
+            )
+        )
+        canvas.create_window((0, 0), window=self.frame, anchor='nw')
+        canvas.configure(xscrollcommand=scrollbar.set)
+        container.pack(padx=25, pady=10)
+        canvas.pack(side=TOP, expand=True, fill=BOTH)
+        scrollbar.pack(side=BOTTOM, fill=X)
+        print('Creating Tables')
+        self.tables = list()
+        self.hashes = list()
+        for i in range(len(self.file_names)):
+            temp = Table(self.frame, self.file_names[i], i + 1)
+            self.tables.append(temp)
+            self.hashes.append(temp.get_hash())
+
+    def update_tables(self, new_tables):
+        if not len(new_tables) == len(self.tables):
+            popup_msg('Something went wrong')
+            return
+        for i in range(len(new_tables)):
+            self.tables[i].artifact.update_artifact(new_tables[i])
+
+    def connect2(self, path, index):
+        self.tables[index].connect(path)
+
+    def get_hash2(self):
+        return self.hashes
+
+
+class ViewDetails:
+    def __init__(self, window, prev, file_names):
+        self.check = False
+        self.option_list = list()
+        self.window = window
+        self.prev = prev
+        self.file_names = file_names
+        self.frame = Frame(self.window, bg='#1F1F1F')
+        self.table_frame = Frame(self.frame, bg='#1F1F1F')
+        self.query_args_frame = Frame(self.frame, bg='#1F1F1F')
+        self.buttons_frame = Frame(self.frame, bg="#2F2F2F")
+        self.textvar = StringVar()
+
+        self.query_args_frame.grid_columnconfigure(0, weight=1, uniform='grouped')
+        self.query_args_frame.grid_columnconfigure(1, weight=1, uniform='grouped')
+        self.query_args_frame.grid_columnconfigure(2, weight=1, uniform='grouped')
+        self.query_args_frame.grid_columnconfigure(3, weight=1, uniform='grouped')
+        self.query_args_frame.grid_rowconfigure(0, weight=1)
+        self.l1frame = Frame(self.query_args_frame, bg='#1F1F1F', padx=5)
+        self.l2frame = Frame(self.query_args_frame, bg='#1F1F1F', padx=5)
+        self.l3frame = Frame(self.query_args_frame, bg='#1F1F1F', padx=5)
+        self.l4frame = Frame(self.query_args_frame, bg='#1F1F1F', padx=5)
+        self.strvar = StringVar()
+        choices = sorted({
+            'ALL',
+            'Date',
+            'Latitude',
+            'Longitude',
+            'Latitude Range',
+            'Longitude Range',
+            'Particular Date',
+            'Particular Latitude',
+            'Particular Longitude',
+            'Date Range'
+        })
+        self.strvar.set('Select Compare Option')
+        self.l1 = Label(self.l1frame, text='Select feature to compare:', bg='#1F1F1F', fg='#FFFFFF')
+        self.l1.pack(side=TOP, pady=2)
+        self.dropdown = OptionMenu(self.l1frame, self.strvar, *choices, command=self.set_this)
+        self.dropdown.config(bg="#2F2F2F", fg="#FFFFFF", relief=FLAT, activebackground="#2F2F2F",
+                             activeforeground="#FFFFFF")
+        self.dropdown["highlightthickness"] = 0
+        self.dropdown["menu"].config(bg="#2F2F2F", fg="#FFFFFF", relief=FLAT)
+        self.dropdown.pack(side=BOTTOM, expand=True, fill=X)
+
+        self.l2 = Label(self.l2frame, text=' ', bg='#1F1F1F', fg='#FFFFFF')
+
+        # self.l2.pack(side=TOP, pady=2,)
+        self.start = Entry(self.l2frame)
+        # self.start.pack(side=BOTTOM, expand=True, fill=X, ipady=5, ipadx=5)
+        self.l3 = Label(self.l3frame, text=' ', bg='#1F1F1F', fg='#FFFFFF')
+        # self.l3.pack(side=TOP, pady=2)
+        self.end = Entry(self.l3frame)
+        # self.end.pack(side=BOTTOM, expand=True, fill=X, ipady=5, ipadx=5)
+        self.l4 = Label(self.l4frame, text=' ', bg='#1F1F1F', fg='#FFFFFF')
+        self.l4.pack(side=TOP, pady=2)
+        compare_button = Button(
+            self.l4frame,
+            command=self.compare,
+            text="Compare",
+            relief=FLAT, bg='#0088DD',
+            fg='#FFFFFF',
+            pady=3,
+            padx=5
+        )
+        compare_button.pack(side=BOTTOM, expand=True, fill=X)
+        self.l1frame.grid(row=0, column=0, sticky=NSEW)
+        self.l2frame.grid(row=0, column=1, sticky=NSEW)
+        self.l3frame.grid(row=0, column=2, sticky=NSEW)
+        self.l4frame.grid(row=0, column=3, sticky=NSEW)
+        map_button = Button(self.buttons_frame, command=self.map_button, text="Map", relief=FLAT, bg='#0088DD',
+                            fg='#FFFFFF', pady=10, padx=10)
+        back_button = Button(self.buttons_frame, command=self.back_button, text="Back", relief=FLAT, bg='#2F2F2F',
+                             fg='#FFFFFF', pady=10, padx=10)
+
+        self.tableobj = TableView(self.table_frame, file_names)
+        self.hashlist = self.tableobj.get_hash2()
+
+        self.users = list()
+        for i in range(1, len(self.hashlist) + 1):
+            self.users.append("Person " + str(i))
+        self.textvar.set("Export")
+
+        export_button = OptionMenu(self.buttons_frame, self.textvar, *self.users, command=self.save_this_file)
+        export_button.config(bg="#2F2F2F", fg="#FFFFFF", relief=FLAT, activebackground="#2F2F2F",
+                             activeforeground="#FFFFFF", pady=10, padx=10)
+        export_button["highlightthickness"] = 0
+        export_button["menu"].config(bg="#2F2F2F", fg="#FFFFFF", relief=FLAT)
+
+        back_button.grid(column=0, row=0, sticky=NSEW)
+        map_button.grid(column=1, row=0, sticky=NSEW)
+        export_button.grid(column=2, row=0, sticky=NSEW)
+        self.buttons_frame.grid_columnconfigure(0, weight=1, uniform="group1")
+        self.buttons_frame.grid_columnconfigure(1, weight=1, uniform="group1")
+        self.buttons_frame.grid_columnconfigure(2, weight=1, uniform="group1")
+        self.buttons_frame.grid_rowconfigure(0, weight=1)
+        self.buttons_frame.pack(side=BOTTOM, fill=X, expand=True, anchor=S)
+        self.table_frame.pack(side=TOP, expand=True, fill=BOTH)
+        self.query_args_frame.pack(expand=True, fill=BOTH)
+
+    def _check_fields(self):
+        if self.strvar.get() == 'Select Compare Option':
+            popup_msg('No compare option selected')
+            return False
+        if self.strvar.get() == 'ALL' or self.strvar.get() == 'Date' or self.strvar.get() == 'Latitude' or \
+                self.strvar.get() == 'Longitude':
+            return True
+        if self.strvar.get() == 'Particular Date':
+            date = self.start.get()
+            is_valid_date = True
+            try:
+                year, month, day = date.split('-')
+                datetime(int(year), int(month), int(day))
+            except ValueError:
+                is_valid_date = False
+            if not is_valid_date:
+                popup_msg('Invalid Date')
+            return is_valid_date
+        if self.strvar.get() == 'Particular Latitude' or self.strvar.get() == 'Particular Longitude':
+            start = self.start.get()
+            is_valid_float = True
+            try:
+                float(start)
+            except ValueError:
+                is_valid_float = False
+            if not is_valid_float:
+                popup_msg('Invalid Value')
+            return is_valid_float
+        if self.strvar.get() == 'Date Range':
+            date1 = self.start.get()
+            date2 = self.end.get()
+            is_valid_date = True
+            try:
+                year1, month1, day1 = date1.split('-')
+                year2, month2, day2 = date2.split('-')
+                datetime(int(year1), int(month1), int(day1))
+                datetime(int(year2), int(month2), int(day2))
+            except ValueError:
+                is_valid_date = False
+            if not is_valid_date:
+                popup_msg('Invalid Date(s)')
+            return is_valid_date
+        if self.strvar.get() == 'Latitude Range' or self.strvar.get() == 'Longitude Range':
+            start = self.start.get()
+            end = self.end.get()
+            is_valid_float = True
+            try:
+                float(start)
+                float(end)
+            except ValueError:
+                is_valid_float = False
+            if not is_valid_float:
+                popup_msg('Invalid value(s)')
+            return is_valid_float
+        print('Unexpected error')
+        return False
+
+    def set_this(self, value):
+        self.start.delete(0, "end")
+        self.end.delete(0, "end")
+        if value == 'ALL' or value == 'Date' or value == 'Latitude' or value == 'Longitude':
+            self.l2frame.grid_forget()
+            self.l3frame.grid_forget()
+        elif value == 'Particular Date' or value == 'Particular Latitude' or value == 'Particular Longitude':
+            self.l3frame.grid_forget()
+            self.l2frame.grid(row=0, column=1, columnspan=2, sticky=NSEW)
+            self.l2.config(text='Enter : ')
+            self.l2.pack(side=TOP, pady=2)
+            self.start.pack(side=BOTTOM, expand=True, fill=X, ipadx=5, ipady=5)
+        else:
+            self.l2frame.grid_forget()
+            self.start.config(width=None)
+            self.l2.config(text='Start : ')
+            self.l2.pack(side=TOP, pady=2)
+            self.start.pack(side=BOTTOM, expand=True, fill=X, ipadx=5, ipady=5)
+            self.l3.config(text='End : ')
+            self.l3.pack(side=TOP, pady=2)
+            self.end.pack(side=BOTTOM, expand=True, fill=X, ipadx=5, ipady=5)
+            self.l2frame.grid(row=0, column=1, sticky=NSEW)
+            self.l3frame.grid(row=0, column=2, sticky=NSEW)
+        self.option_list = list()
+        print(value)
+
+        if value == "ALL":
+            self.option_list.append("Latitude")
+            self.option_list.append("Longitude")
+            self.option_list.append("Date")
+            self.option_list.append("Time")
+        elif value == "Latitude":
+            self.option_list.append("Latitude")
+        elif value == "Longitude":
+            self.option_list.append("Longitude")
+        elif value == "Date":
+            self.option_list.append("Date")
+        elif value == "Longitude Range":
+            self.check = True
+            self.option_list.append("Longitude")
+        elif value == "Latitude Range":
+            self.check = True
+            self.option_list.append("Latitude")
+        elif value == 'Date Range':
+            self.check = True
+            self.option_list.append("Date")
+        elif value == "Particular Date":
+            self.check = True
+            self.option_list.append("Date")
+        elif value == "Particular Latitude":
+            self.check = True
+            self.option_list.append("Latitude")
+        elif value == "Particular Longitude":
+            self.check = True
+            self.option_list.append("Longitude")
+
+    def compare(self):
+        if not self._check_fields():
+            return
+        self.frame.pack_forget()
+        loading = start_loading('Searching...')
+        self.window.update()
+        self._query()
+        self.frame.pack(expand=True, fill=BOTH)
+        stop_loading(loading)
+
+    def _query(self):
+        columns = self.option_list
+        query = ""
+        tables = list()
+        if "Particular" in self.strvar.get():
+            for i in range(len(self.hashlist)):
+                query = "select *"
+                query += " from {} where {} = '{}' group by Time".format('t' + self.hashlist[i], columns[0],
+                                                                         self.start.get())
+                print(query)
+                c.execute(query)
+                tables.append([c.fetchall()])
+            print(tables)
+        else:
+            for i in range(len(self.hashlist)):
+                query += "select "
+                for j in range(len(columns)):
+                    query += columns[j]
+                    if j != len(columns) - 1:
+                        query += ", "
+                query += " from {}".format('t' + self.hashlist[i])
+                if i != len(self.hashlist) - 1:
+                    query += " intersect "
+            if self.start.get() != "" and self.end.get() != "" and self.check:
+                query += " where {} >= '{}' and {} <= '{}'".format(columns[0], self.start.get(), columns[0], self.end.get())
+            query += " group by Time"
+            print(query)
+            c.execute(query)
+            values = c.fetchall()
+            for i in range(len(self.hashlist)):
+                temp = list()
+                for x in values:
+                    query = "select *"
+                    query += " from {} where {} = '{}' group by Time".format('t' + self.hashlist[i], columns[0], x[0])
+                    print(query)
+                    c.execute(query)
+                    temp.append(c.fetchall())
+                tables.append(temp)
+            print(tables)
+        self.tableobj.update_tables(tables)
+
+    def save_this_file(self, value):
+        for p in range(len(self.users)):
+            if value == self.users[p]:
+                self.export_file(p)
+
+    def get_frame(self):
+        return self.frame
+
+    def get_files(self):
+        return self.file_names
+
+    def map_button(self):
+        # TODO: Maps
+        # (self.tableobj) is a TableView object which has a class variable called tables which is
+        # a list containing objects of class Artifact wich contains class variables called
+        # latitude, longitude, date and time, all of which are lists
+        # for a loop variable i you can access attributes of user i+1 by variables:
+        #   self.tableobj.tables[i].artifact.latitudes
+        #   self.tableobj.tables[i].artifact.longitudes
+        #   self.tableobj.tables[i].artifact.date
+        #   self.tableobj.tables[i].artifact.time
+        color=['#0000FF','#8A2BE2','#A52A2A','#5F9EA0','#7FFF00','#00FFFF']
+        color1=['Blue','BlueViolet','Brown','CadetBlue','Chartreuse','Cyan']
+        f = open("map1.html", "w+")
+        gmap = gmplot.GoogleMapPlotter(24.7, 77.41, 5)
+        for i in range(0,len(self.tableobj.tables)):
+            latitude = [element for element in set(self.tableobj.tables[i].artifact.latitude) if isinstance(element, (int, float))]
+            longitude = [element for element in set(self.tableobj.tables[i].artifact.longitude) if isinstance(element, (int, float))]
+            gmap.scatter(latitude,longitude,color[i],size=10,marker=False)
+            gmap.plot(latitude,longitude,color[i],edge_width=6-i)
+        gmap.draw("map1.html")
+        webbrowser.open("map1.html",new=2)
+
+    def back_button(self):
+        self.frame.pack_forget()
+        pack(self.prev)
+
+    def export_file(self, index):
+        files = [("csv Files", "*csv")]
+        path = filedialog.asksaveasfilename(filetypes=files)
+        self.tableobj.connect2(path, index)
+        self.textvar.set('Export')
+
+
+def start_loading(text):
+    frame = Frame(root, bg='#1F1F1F')
+    Label(frame, text=text, bg='#1F1F1F', fg='#FFFFFF').pack(fill=BOTH, expand=True)
+    frame.pack(fill=BOTH, expand=True)
+    return frame
+
+
+def stop_loading(frame):
+    frame.pack_forget()
+
+
+def pack(obj):
+    obj.get_frame().pack(expand=True, fill=BOTH)
+
+
+def unpack(obj):
+    obj.get_frame().pack_forget()
+
+
+def popup_msg(msg):
+    messagebox.showerror('Error', msg)
+
+
+def center(win):
+    win.update_idletasks()
+    width = win.winfo_width()
+    height = win.winfo_height()
+    x = (win.winfo_screenwidth() // 2) - (width // 2)
+    y = (win.winfo_screenheight() // 2) - (height // 2)
+    win.geometry('{}x{}+{}+{}'.format(width, height, x, y))
+
+
+root = Tk()
+root.title('Tool')
+root.minsize(900, 512)
 root.title("GM-LHCT")
-root.state("zoomed")						#Full screen
-root.resizable(0,0)						#screen size is not changeable
-frame = Frame(root)
-frame.place(relx=0,rely=0,relwidth =1, relheight = 1)           #defining frame
-
-
-Label(frame, text = "SELECT FILE 1" ).place(relx = 0.04,rely=0.03)  #label for file selection
-Label(frame, text = "SELECT FILE 2" ).place(relx = 0.04,rely=0.09)  #label for file selection
-
-
-num1 = Entry(root)					#entry box for displaying first file name
-num2 = Entry(root)  				#entry box for displaying first file name
-num1.place(relx = 0.6,rely=0.03, relwidth = 0.5,anchor = NE) #placing entry boxes
-num2.place(relx = 0.6,rely=0.09, relwidth = 0.5,anchor = NE) #placing entry boxes
-
-hash1 = Entry(root)					#entry box for displaying first file name
-hash2 = Entry(root)  				#entry box for displaying first file name
-hash1.place(relx = 0.36,rely=0.91,anchor = NE,relwidth=0.28) #placing entry boxes
-hash2.place(relx = 0.9,rely=0.91,anchor = NE,relwidth=0.28)
-
-h1=Label(root, text="Hash Value")
-h1.config(font = ("Courier bold",9))
-h1.place(relx=.03, rely=.91)
-
-h2=Label(root, text="Hash Value")
-h2.config(font = ("Courier bold",9))
-h2.place(relx=.57, rely=.91)
-
-conn=sqlite3.connect("test1.db")
-conn=sqlite3.connect("test.db")
-
-def create_table(store):                                                            #Creating first database table
-    conn=sqlite3.connect("test1.db")  				   #connecting to database
-    cur=conn.cursor()
-    cur.execute("CREATE TABLE IF NOT EXISTS "+ store + " (Longitude STRING,Latitude STRING,Time STRING,Date STRING)")			#executing cursor to create table
-    conn.commit()
-    conn.close()
-
-
-
-def insert(Longitude,Latitude,Time,Date,store):		#inserting heading to table
-    conn=sqlite3.connect("test1.db")				#Connecting to database
-    cur=conn.cursor()
-    cur.execute("INSERT INTO "+ store + " VALUES (?,?,?,?)",(Longitude,Latitude,Time,Date))			#inserting values into table
-    conn.commit()
-    conn.close()
-
-def view(store):						#function to display whole data
-    conn=sqlite3.connect("test1.db")
-    cur=conn.cursor()
-    cur.execute("SELECT * FROM "+store)
-    rows=cur.fetchall()
-    conn.close()
-    return rows
-def common():							#function to get intersection
-    conn=sqlite3.connect("test1.db")
-    cur=conn.cursor()
-    print(cur.execute('SELECT * FROM t INTERSECT SELECT * FROM t1'))
-    rows=cur.fetchall()
-    conn.close()
-    return rows
-
-
-#function to insert values into CSV table from selected file then to database file
-def browsefunc():
-    lat = []
-    lon = []
-    t = []
-    d=[]
-    hash1.delete(0,END)
-    num1.delete(0, END)
-    filename = filedialog.askopenfilename()
-    pathlabel.config(text=filename)
-    num1.insert(0, filename)
-    #Reading and extracting data from JSON file
-    json_data=open(filename,"rb").read()
-    hasher1=hashlib.md5(json_data).hexdigest()
-
-    hash1.insert(0,hasher1)
-    json_obj = json.loads(json_data)
-
-    data = ['---','---','---','---']
-    store = "t"  			#Table in database
-    create_table(store)
-    table1 = Texttable()		#Texttable in python is used to create table
-
-   #Running code for parsing the JSON file
-    for i in json_obj.values():
-        for j in range(len(i)):
-            for k in i[j].keys():
-                if(k == 'latitudeE7'):
-                    data[0]= i[j][k]/e
-                    lat.append(data[0])
-                if(k == 'longitudeE7'):
-                    data[1]= i[j][k]/e
-                    lon.append(data[1])
-                if(k == 'timestampMs'):
-                    date_time= str(datetime.fromtimestamp(int(i[j][k][0:-3])))
-                    data[3]= date_time[0:10]
-                    data[2]= date_time[11:16]
-                    t.append(data[2])
-                    d.append(data[3])
-
-    #Creating data from from list then converting to CSV
-    datafr = {'Latitude':lat,"Longitude":lon,"Date":d,"Time":t}
-    df = pd.DataFrame(datafr)
-    df.to_csv("data_1.csv",index= True)
-
-    TableMargin = Frame(root)
-    TableMargin.place(relx = 0.36,rely=0.3,anchor = NE,relwidth=0.28,relheight=0.6)
-    #Scrollbar for table
-    scrollbarx = Scrollbar(TableMargin, orient=HORIZONTAL)
-    scrollbary = Scrollbar(TableMargin, orient=VERTICAL)
-    tree = ttk.Treeview(TableMargin, columns=("Latitude", "Longitude", "Date", "Time"), height=50, selectmode="extended", yscrollcommand=scrollbary.set)
-    scrollbary.config(command=tree.yview)
-    scrollbary.pack(side=RIGHT, fill=Y)
-
-    tree.heading('Latitude', text="Latitude", anchor=W)
-    tree.heading('Longitude', text="Longitude", anchor=W)
-    tree.heading('Date', text="Date", anchor=W)
-    tree.heading('Time', text="Time", anchor=W)
-    tree.column('#0', stretch=NO, minwidth=0, width=25)
-    tree.column('#1', stretch=NO, minwidth=0, width=100)
-    tree.column('#2', stretch=NO, minwidth=0, width=100)
-    tree.column('#3', stretch=NO, minwidth=0, width=100)
-    tree.pack()
-
-    #Reading CSV file to import data to database
-    with open('data_1.csv') as f:
-        reader = csv.DictReader(f, delimiter=',')
-        for row in reader:
-            Latitude = row['Latitude']
-            Longitude = row['Longitude']
-            Date = row['Date']
-            Time = row['Time']
-            tree.insert("", 0, values=(Latitude,Longitude,Date,Time))
-
-    con = sqlite3.connect('test1.db')
-    cur = con.cursor()
-    cur.execute("CREATE TABLE IF NOT EXISTS t (Longitude STRING,Latitude STRING,Date STRING,Time STRING)")
-    with open('data_1.csv',newline='') as fin:
-        dr = csv.DictReader(fin)
-        to_db = [(i['Latitude'],i['Longitude'],i['Date'],i['Time'] ) for i in dr  ]
-
-    cur.executemany("INSERT INTO t (Latitude,Longitude,Date,Time) VALUES (?,?,?,?); ", to_db )
-    con.commit()
-    con.close()
-
-
-#Another browse function for 2nd file input
-def browsefunc1():
-    lat1 = []
-    lon1 = []
-    t1 = []
-    d1=[]
-    hash2.delete(0,END)
-    num2.delete(0, END)
-    filename = filedialog.askopenfilename()
-    pathlabel.config(text=filename)
-    num2.insert(0, filename)
-    json_data=open(filename,'rb').read()
-    hasher2=hashlib.md5(json_data).hexdigest()
-    hash2.insert(0,hasher2)
-    json_obj = json.loads(json_data)
-
-    data = ['---','---','---','---']
-    table2 = Texttable()
-    create_table("t1")
-    for i in json_obj.values():
-        for j in range(len(i)):
-            for k in i[j].keys():
-                if(k == 'latitudeE7'):
-                    lat1.append(i[j][k]/e)
-                    data[0]= i[j][k]/e
-                if(k == 'longitudeE7'):
-                    lon1.append(i[j][k]/e)
-                    data[1]= i[j][k]/e
-                if(k == 'timestampMs'):
-                    date_time= str(datetime.fromtimestamp(int(i[j][k][0:-3])))
-                    data[3]= date_time[0:10]
-                    data[2]= date_time[11:16]
-                    t1.append(data[2])
-                    d1.append(data[3])
-
-
-    datafr = {'Latitude':lat1,"Longitude":lon1,"Date":d1,"Time":t1}
-    df = pd.DataFrame(datafr)
-    df.to_csv("data_2.csv",index= False)
-
-
-
-    TableMargin = Frame(root)
-    TableMargin.place(relx = 0.9,rely=0.3,anchor = NE,relwidth=0.28,relheight=0.6)
-    scrollbarx = Scrollbar(TableMargin, orient=HORIZONTAL)
-    scrollbary = Scrollbar(TableMargin, orient=VERTICAL)
-    tree = ttk.Treeview(TableMargin, columns=("Latitude", "Longitude", "Date", "Time"), height=50, selectmode="extended", yscrollcommand=scrollbary.set)
-    scrollbary.config(command=tree.yview)
-    scrollbary.pack(side=RIGHT, fill=Y)
-
-    tree.heading('Latitude', text="Latitude", anchor=W)
-    tree.heading('Longitude', text="Longitude", anchor=W)
-    tree.heading('Date', text="Date", anchor=W)
-    tree.heading('Time', text="Time", anchor=W)
-    tree.column('#0', stretch=NO, minwidth=0, width=5)
-    tree.column('#1', stretch=NO, minwidth=0, width=100)
-    tree.column('#2', stretch=NO, minwidth=0, width=100)
-    tree.column('#3', stretch=NO, minwidth=0, width=100)
-    tree.pack()
-
-
-    with open('data_2.csv') as f:
-        reader = csv.DictReader(f, delimiter=',')
-        for row in reader:
-            Latitude = row['Latitude']
-            Longitude = row['Longitude']
-            Date = row['Date']
-            Time = row['Time']
-            tree.insert("", 0, values=(Latitude,Longitude,Date,Time))
-
-
-
-
-
-    con = sqlite3.connect('test1.db')
-    cur = con.cursor()
-    cur.execute("CREATE TABLE IF NOT EXISTS t1 (Longitude STRING,Latitude STRING,Date STRING,Time STRING)")
-    with open('data_2.csv',newline='') as fin:
-        dr = csv.DictReader(fin)
-        to_db = [(i['Latitude'],i['Longitude'],i['Date'],i['Time'] ) for i in dr  ]
-
-    cur.executemany("INSERT INTO t1 (Latitude,Longitude,Date,Time) VALUES (?,?,?,?); ", to_db )
-    con.commit()
-    con.close()
-def common_Longitude():			#display where longitude data is common
-    conn=sqlite3.connect("test1.db")
-    cur=conn.cursor()
-
-    cur.execute('SELECT * FROM t WHERE t.Longitude= (SELECT t1.Longitude from t1 where t.Longitude=t1.Longitude)')
-    rows1=cur.fetchall()
-    print(rows1)
-    cur.execute('SELECT * FROM t1 WHERE t1.Longitude= (SELECT t.Longitude from t where t1.Longitude=t.Longitude)')
-    rows2=cur.fetchall()
-
-    conn.close()
-    TableMargin = Frame(root)
-    TableMargin.place(relx = 0.36,rely=0.3,anchor = NE,relwidth=0.28,relheight=0.6)
-    tablex=ttk.Treeview(TableMargin,heigh=10,columns=("#0","#1","#2","#3"))
-    tablex.column("#0",width = 50)
-    tablex.column("#1",width = 100)
-    tablex.column("#2",width = 100)
-    tablex.column("#3",width = 100)
-    tablex.column("#4",width = 70)
-    tablex.heading('#0',text='Id')
-    tablex.heading('#1',text='LATITUDE')
-    tablex.heading('#2',text='LONGITUDE')
-    tablex.heading('#3',text='Date')
-    tablex.heading('#4',text='Time')
-
-
-
-    for i in range(len(rows1)):
-         tablex.insert("",i,text=i,values=(rows1[i][0],rows1[i][1],rows1[i][2],rows1[i][3]))
-
-
-    scrollbarx = Scrollbar(TableMargin, orient=HORIZONTAL)
-    scrollbary = Scrollbar(TableMargin, orient=VERTICAL)
-
-    tablex.place(relx = 0.45,rely=0.15,anchor = NE,relwidth=0.4,relheight=0.8)
-    tablex.lift()
-    TableMargin = Frame(root)
-    TableMargin.place(relx = 0.36,rely=0.3,anchor = NE,relwidth=0.28,relheight=0.6)
-    tablex1=ttk.Treeview(TableMargin,heigh=10,columns=("#0","#1","#2","#3"))
-    tablex1.column("#0",width = 50)
-    tablex1.column("#1",width = 100)
-    tablex1.column("#2",width = 100)
-    tablex1.column("#3",width = 100)
-    tablex1.column("#4",width = 70)
-    tablex1.heading('#0',text='Id')
-    tablex1.heading('#1',text='LATITUDE')
-    tablex1.heading('#2',text='LONGITUDE')
-    tablex1.heading('#3',text='Date')
-    tablex1.heading('#4',text='Time')
-
-
-
-    for i in range(len(rows2)):
-         tablex1.insert("",i,text=i,values=(rows2[i][0],rows2[i][1],rows2[i][3],rows2[i][2]))
-
-
-    vsb = ttk.Scrollbar(tablex1, orient="vertical", command=tablex1.yview)
-    vsb.pack(side='right', fill='y')
-    tree.configure(yscrollcommand=vsb.set)
-
-    tablex1.place(relx = 0.9,rely=0.3,anchor = NE,relwidth=0.28,relheight=0.6)
-    tablex1.lift()
-
-    mainloop()
-
-def common_Latitude():			#display common latitude data 0.
-    conn=sqlite3.connect("test1.db")
-    cur=conn.cursor()
-    cur.execute('SELECT * FROM t WHERE t.Latitude= (SELECT t1.Latitude from t1 where t.Latitude=t1.Latitude)')
-    rows1=cur.fetchall()
-    cur.execute('SELECT * FROM t1 WHERE t1.Latitude= (SELECT t.Latitude from t where t1.Latitude=t.Latitude)')
-    rows2=cur.fetchall()
-    conn.close()
-    tree = ttk.Treeview(root)
-    tablex=ttk.Treeview(heigh=10,columns=("#0","#1","#2","#3"))
-    tablex.column("#0",width = 50)
-    tablex.column("#1",width = 100)
-    tablex.column("#2",width = 100)
-    tablex.column("#3",width = 100)
-    tablex.column("#4",width = 70)
-    tablex.heading('#0',text='Id')
-    tablex.heading('#1',text='LATITUDE')
-    tablex.heading('#2',text='LONGITUDE')
-    tablex.heading('#3',text='Date')
-    tablex.heading('#4',text='Time')
-
-
-
-    for i in range(len(rows1)):
-         tablex.insert("",i,text=i,values=(rows1[i][0],rows1[i][1],rows1[i][3],rows1[i][2]))
-
-
-    vsb = ttk.Scrollbar(tablex, orient="vertical", command=tablex.yview)
-    vsb.pack(side='right', fill='y')
-    tree.configure(yscrollcommand=vsb.set)
-
-    tablex.place(relx = 0.36,rely=0.3,anchor = NE,relwidth=0.28,relheight=0.6)
-    tablex.lift()
-    tree = ttk.Treeview(root)
-    tablex1=ttk.Treeview(heigh=10,columns=("#0","#1","#2","#3"))
-    tablex1.column("#0",width = 50)
-    tablex1.column("#1",width = 100)
-    tablex1.column("#2",width = 100)
-    tablex1.column("#3",width = 100)
-    tablex1.column("#4",width = 70)
-    tablex1.heading('#0',text='Id')
-    tablex1.heading('#1',text='LATITUDE')
-    tablex1.heading('#2',text='LONGITUDE')
-    tablex1.heading('#3',text='Date')
-    tablex1.heading('#4',text='Time')
-
-
-
-    for i in range(len(rows2)):
-         tablex1.insert("",i,text=i,values=(rows2[i][0],rows2[i][1],rows2[i][3],rows2[i][2]))
-
-
-    vsb = ttk.Scrollbar(tablex1, orient="vertical", command=tablex1.yview)
-    vsb.pack(side='right', fill='y')
-    tree.configure(yscrollcommand=vsb.set)
-
-    tablex1.place(relx = 0.9,rely=0.3,anchor = NE,relwidth=0.28,relheight=0.6)
-    tablex1.lift()
-
-    mainloop()
-# if common Latitude
-# if common time
-def common_time():
-    conn=sqlite3.connect("test1.db")
-    cur=conn.cursor()
-    print(cur.execute('SELECT * FROM t WHERE t.Time= (SELECT t1.Time from t1 where t.Time=t1.Time)'))
-    rows1=cur.fetchall()
-    print(cur.execute('SELECT * FROM t1 WHERE t1.Time= (SELECT t.Time from t where t1.Time=t.Time)'))
-    rows2=cur.fetchall()
-    conn.close()
-    tree = ttk.Treeview(root)
-    tablex=ttk.Treeview(heigh=10,columns=("#0","#1","#2","#3"))
-    tablex.column("#0",width = 50)
-    tablex.column("#1",width = 100)
-    tablex.column("#2",width = 100)
-    tablex.column("#3",width = 100)
-    tablex.column("#4",width = 70)
-    tablex.heading('#0',text='Id')
-    tablex.heading('#1',text='LATITUDE')
-    tablex.heading('#2',text='LONGITUDE')
-    tablex.heading('#3',text='Date')
-    tablex.heading('#4',text='Time')
-
-
-
-    for i in range(len(rows1)):
-         tablex.insert("",i,text=i,values=(rows1[i][0],rows1[i][1],rows1[i][3],rows1[i][2]))
-
-
-    vsb = ttk.Scrollbar(tablex, orient="vertical", command=tablex.yview)
-    vsb.pack(side='right', fill='y')
-    tree.configure(yscrollcommand=vsb.set)
-
-    tablex.place(relx = 0.36,rely=0.3,anchor = NE,relwidth=0.28,relheight=0.6)
-    tablex.lift()
-    tree = ttk.Treeview(root)
-    tablex1=ttk.Treeview(heigh=10,columns=("#0","#1","#2","#3"))
-    tablex1.column("#0",width = 50)
-    tablex1.column("#1",width = 100)
-    tablex1.column("#2",width = 100)
-    tablex1.column("#3",width = 100)
-    tablex1.column("#4",width = 70)
-    tablex1.heading('#0',text='Id')
-    tablex1.heading('#1',text='LATITUDE')
-    tablex1.heading('#2',text='LONGITUDE')
-    tablex1.heading('#3',text='Date')
-    tablex1.heading('#4',text='Time')
-
-
-
-    for i in range(len(rows2)):
-         tablex1.insert("",i,text=i,values=(rows2[i][0],rows2[i][1],rows2[i][3],rows2[i][2]))
-
-
-    vsb = ttk.Scrollbar(tablex1, orient="vertical", command=tablex1.yview)
-    vsb.pack(side='right', fill='y')
-    tree.configure(yscrollcommand=vsb.set)
-
-    tablex1.place(relx = 0.9,rely=0.3,anchor = NE,relwidth=0.28,relheight=0.6)
-    tablex1.lift()
-
-    mainloop()
-# if common Latitude
-#if common dat
-def common_Date():
-    conn=sqlite3.connect("test1.db")
-    cur=conn.cursor()
-    cur.execute('SELECT * FROM t WHERE t.Date= (SELECT t1.Date from t1 where t.Date=t1.Date)')
-    rows1=cur.fetchall()
-    cur.execute('SELECT * FROM t1 WHERE t1.Date= (SELECT t.Date from t where t1.Date=t.Date)')
-    rows2=cur.fetchall()
-    conn.close()
-    tree = ttk.Treeview(root)
-    tablex=ttk.Treeview(heigh=10,columns=("#0","#1","#2","#3"))
-    tablex.column("#0",width = 50)
-    tablex.column("#1",width = 100)
-    tablex.column("#2",width = 100)
-    tablex.column("#3",width = 100)
-    tablex.column("#4",width = 70)
-    tablex.heading('#0',text='Id')
-    tablex.heading('#1',text='LATITUDE')
-    tablex.heading('#2',text='LONGITUDE')
-    tablex.heading('#3',text='Date')
-    tablex.heading('#4',text='Time')
-
-
-
-    for i in range(len(rows1)):
-         tablex.insert("",i,text=i,values=(rows1[i][0],rows1[i][1],rows1[i][3],rows1[i][2]))
-
-
-    vsb = ttk.Scrollbar(tablex, orient="vertical", command=tablex.yview)
-    vsb.pack(side='right', fill='y')
-    tree.configure(yscrollcommand=vsb.set)
-
-    tablex.place(relx = 0.36,rely=0.3,anchor = NE,relwidth=0.28,relheight=0.6)
-    tablex.lift()
-    tree = ttk.Treeview(root)
-    tablex1=ttk.Treeview(heigh=10,columns=("#0","#1","#2","#3"))
-    tablex1.column("#0",width = 50)
-    tablex1.column("#1",width = 100)
-    tablex1.column("#2",width = 100)
-    tablex1.column("#3",width = 100)
-    tablex1.column("#4",width = 70)
-    tablex1.heading('#0',text='Id')
-    tablex1.heading('#1',text='LATITUDE')
-    tablex1.heading('#2',text='LONGITUDE')
-    tablex1.heading('#3',text='Date')
-    tablex1.heading('#4',text='Time')
-
-
-
-    for i in range(len(rows2)):
-         tablex1.insert("",i,text=i,values=(rows2[i][0],rows2[i][1],rows2[i][3],rows2[i][2]))
-
-
-    vsb = ttk.Scrollbar(tablex1, orient="vertical", command=tablex1.yview)
-    vsb.pack(side='right', fill='y')
-    tree.configure(yscrollcommand=vsb.set)
-
-    tablex1.place(relx = 0.9,rely=0.3,anchor = NE,relwidth=0.28,relheight=0.6)
-
-    mainloop()
-def common_Date1(dt):			#display date data for a particular date
-    conn=sqlite3.connect("test1.db")
-    cur=conn.cursor()
-    cur.execute("SELECT * FROM t WHERE t.Date=\'%s\'"%dt)
-    rows1=cur.fetchall()
-    cur.execute("SELECT * FROM t1 WHERE t1.Date=\'%s\'"%dt)
-    rows2=cur.fetchall()
-    conn.close()
-    tree = ttk.Treeview(root)
-    tablex=ttk.Treeview(heigh=10,columns=("#0","#1","#2","#3"))
-    tablex.column("#0",width = 50)
-    tablex.column("#1",width = 100)
-    tablex.column("#2",width = 100)
-    tablex.column("#3",width = 100)
-    tablex.column("#4",width = 70)
-    tablex.heading('#0',text='Id')
-    tablex.heading('#1',text='LATITUDE')
-    tablex.heading('#2',text='LONGITUDE')
-    tablex.heading('#3',text='Date')
-    tablex.heading('#4',text='Time')
-
-
-
-    for i in range(len(rows1)):
-         tablex.insert("",i,text=i,values=(rows1[i][0],rows1[i][1],rows1[i][3],rows1[i][2]))
-
-
-    vsb = ttk.Scrollbar(tablex, orient="vertical", command=tablex.yview)
-    vsb.pack(side='right', fill='y')
-    tree.configure(yscrollcommand=vsb.set)
-
-    tablex.place(relx = 0.36,rely=0.3,anchor = NE,relwidth=0.28,relheight=0.6)
-    tablex.lift()
-    tree = ttk.Treeview(root)
-    tablex1=ttk.Treeview(heigh=10,columns=("#0","#1","#2","#3"))
-    tablex1.column("#0",width = 50)
-    tablex1.column("#1",width = 100)
-    tablex1.column("#2",width = 100)
-    tablex1.column("#3",width = 100)
-    tablex1.column("#4",width = 70)
-    tablex1.heading('#0',text='Id')
-    tablex1.heading('#1',text='LATITUDE')
-    tablex1.heading('#2',text='LONGITUDE')
-    tablex1.heading('#3',text='Date')
-    tablex1.heading('#4',text='Time')
-
-
-
-    for i in range(len(rows2)):
-         tablex1.insert("",i,text=i,values=(rows2[i][0],rows2[i][1],rows2[i][3],rows2[i][2]))
-
-
-    vsb = ttk.Scrollbar(tablex1, orient="vertical", command=tablex1.yview)
-    vsb.pack(side='right', fill='y')
-    tree.configure(yscrollcommand=vsb.set)
-
-    tablex1.place(relx = 0.9,rely=0.3,anchor = NE,relwidth=0.28,relheight=0.6)
-# if you want to print common data which is match with enter data
-def common_Longitude1(lg):
-    conn=sqlite3.connect("test1.db")
-    cur=conn.cursor()
-    cur.execute("SELECT * FROM t WHERE t.Longitude="+lg)
-    rows1=cur.fetchall()
-    cur.execute("SELECT * FROM t1 WHERE t1.Longitude="+lg)
-    rows2=cur.fetchall()
-    conn.close()
-    tree = ttk.Treeview(root)
-    tablex=ttk.Treeview(heigh=10,columns=("#0","#1","#2","#3"))
-    tablex.column("#0",width = 50)
-    tablex.column("#1",width = 100)
-    tablex.column("#2",width = 100)
-    tablex.column("#3",width = 100)
-    tablex.column("#4",width = 70)
-    tablex.heading('#0',text='Id')
-    tablex.heading('#1',text='LATITUDE')
-    tablex.heading('#2',text='LONGITUDE')
-    tablex.heading('#3',text='Date')
-    tablex.heading('#4',text='Time')
-
-
-
-    for i in range(len(rows1)):
-         tablex.insert("",i,text=i,values=(rows1[i][0],rows1[i][1],rows1[i][3],rows1[i][2]))
-
-
-    vsb = ttk.Scrollbar(tablex, orient="vertical", command=tablex.yview)
-    vsb.pack(side='right', fill='y')
-    tree.configure(yscrollcommand=vsb.set)
-
-    tablex.place(relx = 0.36,rely=0.3,anchor = NE,relwidth=0.28,relheight=0.6)
-    tablex.lift()
-    tree = ttk.Treeview(root)
-    tablex1=ttk.Treeview(heigh=10,columns=("#0","#1","#2","#3"))
-    tablex1.column("#0",width = 50)
-    tablex1.column("#1",width = 100)
-    tablex1.column("#2",width = 100)
-    tablex1.column("#3",width = 100)
-    tablex1.column("#4",width = 70)
-    tablex1.heading('#0',text='Id')
-    tablex1.heading('#1',text='LATITUDE')
-    tablex1.heading('#2',text='LONGITUDE')
-    tablex1.heading('#3',text='Date')
-    tablex1.heading('#4',text='Time')
-
-
-
-    for i in range(len(rows2)):
-         tablex1.insert("",i,text=i,values=(rows2[i][0],rows2[i][1],rows2[i][3],rows2[i][2]))
-
-
-    vsb = ttk.Scrollbar(tablex1, orient="vertical", command=tablex1.yview)
-    vsb.pack(side='right', fill='y')
-    tree.configure(yscrollcommand=vsb.set)
-
-    tablex1.place(relx = 0.9,rely=0.3,anchor = NE,relwidth=0.28,relheight=0.6)
-
-# if you want to print common data which is match with enter data
-def common_Latitude1(lt):
-    print(lt,type(lt))
-    #input()
-    conn=sqlite3.connect("test1.db")
-    cur=conn.cursor()
-    cur.execute("SELECT * FROM t WHERE t.Latitude = "+str(lt))
-    rows1=cur.fetchall()
-    cur.execute("SELECT * FROM t1 WHERE t1.Latitude ="+str(lt))
-    rows2=cur.fetchall()
-    conn.close()
-    tree = ttk.Treeview(root)
-    tablex=ttk.Treeview(heigh=10,columns=("#0","#1","#2","#3"))
-    tablex.column("#0",width = 50)
-    tablex.column("#1",width = 100)
-    tablex.column("#2",width = 100)
-    tablex.column("#3",width = 100)
-    tablex.column("#4",width = 70)
-    tablex.heading('#0',text='Id')
-    tablex.heading('#1',text='LATITUDE')
-    tablex.heading('#2',text='LONGITUDE')
-    tablex.heading('#3',text='Dates')
-    tablex.heading('#4',text='Time')
-
-
-
-    for i in range(len(rows1)):
-         tablex.insert("",i,text=i,values=(rows1[i][0],rows1[i][1],rows1[i][3],rows1[i][2]))
-
-
-    vsb = ttk.Scrollbar(tablex, orient="vertical", command=tablex.yview)
-    vsb.pack(side='right', fill='y')
-    tree.configure(yscrollcommand=vsb.set)
-
-    tablex.place(relx = 0.36,rely=0.3,anchor = NE,relwidth=0.28,relheight=0.6)
-    tablex.lift()
-    tree = ttk.Treeview(root)
-    tablex1=ttk.Treeview(heigh=10,columns=("#0","#1","#2","#3"))
-    tablex1.column("#0",width = 50)
-    tablex1.column("#1",width = 100)
-    tablex1.column("#2",width = 100)
-    tablex1.column("#3",width = 100)
-    tablex1.column("#4",width = 70)
-    tablex1.heading('#0',text='Id')
-    tablex1.heading('#1',text='LATITUDE')
-    tablex1.heading('#2',text='LONGITUDE')
-    tablex1.heading('#3',text='Date')
-    tablex1.heading('#4',text='Time')
-
-
-
-    for i in range(len(rows2)):
-         tablex1.insert("",i,text=i,values=(rows2[i][0],rows2[i][1],rows2[i][3],rows2[i][2]))
-
-
-    vsb = ttk.Scrollbar(tablex1, orient="vertical", command=tablex1.yview)
-    vsb.pack(side='right', fill='y')
-    tree.configure(yscrollcommand=vsb.set)
-
-    tablex1.place(relx = 0.9,rely=0.3,anchor = NE,relwidth=0.28,relheight=0.6)
-
-
-
-
-def common_date11(dt1,dt2):				            #displaying common data table
-    conn=sqlite3.connect("test1.db")
-    cur=conn.cursor()
-    cur.execute("SELECT * FROM t WHERE t.Date BETWEEN \'%s\' AND \'%s\'"  %(dt1,dt2))
-    rows1=cur.fetchall()
-    cur.execute("SELECT * FROM t1 WHERE t1.Date BETWEEN \'%s\' AND \'%s\'"  %(dt1,dt2))
-    rows2=cur.fetchall()
-    conn.close()
-    tree = ttk.Treeview(root)
-    tablex=ttk.Treeview(heigh=10,columns=("#0","#1","#2","#3"))
-    tablex.column("#0",width = 50)
-    tablex.column("#1",width = 100)
-    tablex.column("#2",width = 100)
-    tablex.column("#3",width = 100)
-    tablex.column("#4",width = 70)
-    tablex.heading('#0',text='Id')
-    tablex.heading('#1',text='LATITUDE')
-    tablex.heading('#2',text='LONGITUDE')
-    tablex.heading('#3',text='Dates')
-    tablex.heading('#4',text='Time')
-
-
-
-    for i in range(len(rows1)):
-         tablex.insert("",i,text=i,values=(rows1[i][0],rows1[i][1],rows1[i][3],rows1[i][2]))
-
-
-    vsb = ttk.Scrollbar(tablex, orient="vertical", command=tablex.yview)
-    vsb.pack(side='right', fill='y')
-    tree.configure(yscrollcommand=vsb.set)
-
-    tablex.place(relx = 0.36,rely=0.3,anchor = NE,relwidth=0.28,relheight=0.6)
-    tablex.lift()
-    tree = ttk.Treeview(root)
-    tablex1=ttk.Treeview(heigh=10,columns=("#0","#1","#2","#3"))
-    tablex1.column("#0",width = 50)
-    tablex1.column("#1",width = 100)
-    tablex1.column("#2",width = 100)
-    tablex1.column("#3",width = 100)
-    tablex1.column("#4",width = 70)
-    tablex1.heading('#0',text='Id')
-    tablex1.heading('#1',text='LATITUDE')
-    tablex1.heading('#2',text='LONGITUDE')
-    tablex1.heading('#3',text='Date')
-    tablex1.heading('#4',text='Time')
-
-
-
-    for i in range(len(rows2)):
-         tablex1.insert("",i,text=i,values=(rows2[i][0],rows2[i][1],rows2[i][3],rows2[i][2]))
-
-
-    vsb = ttk.Scrollbar(tablex1, orient="vertical", command=tablex1.yview)
-    vsb.pack(side='right', fill='y')
-    tree.configure(yscrollcommand=vsb.set)
-
-    tablex1.place(relx = 0.9,rely=0.3,anchor = NE,relwidth=0.28,relheight=0.6)
-
-def common_Longitude11(tm1,tm2):
-    conn=sqlite3.connect("test1.db")
-    cur=conn.cursor()
-    cur.execute("SELECT * FROM t WHERE t.Longitude BETWEEN \'%s\' AND \'%s\'"  %(tm1,tm2))
-    rows1=cur.fetchall()
-    cur.execute("SELECT * FROM t1 WHERE t1.Longitude BETWEEN \'%s\' AND \'%s\'"  %(tm1,tm2))
-    rows2=cur.fetchall()
-    conn.close()
-    tree = ttk.Treeview(root)
-    tablex=ttk.Treeview(heigh=10,columns=("#0","#1","#2","#3"))
-    tablex.column("#0",width = 50)
-    tablex.column("#1",width = 100)
-    tablex.column("#2",width = 100)
-    tablex.column("#3",width = 100)
-    tablex.column("#4",width = 70)
-    tablex.heading('#0',text='Id')
-    tablex.heading('#1',text='LATITUDE')
-    tablex.heading('#2',text='LONGITUDE')
-    tablex.heading('#3',text='Dates')
-    tablex.heading('#4',text='Time')
-
-
-
-    for i in range(len(rows1)):
-         tablex.insert("",i,text=i,values=(rows1[i][0],rows1[i][1],rows1[i][3],rows1[i][2]))
-
-
-    vsb = ttk.Scrollbar(tablex, orient="vertical", command=tablex.yview)
-    vsb.pack(side='right', fill='y')
-    tree.configure(yscrollcommand=vsb.set)
-
-    tablex.place(relx = 0.36,rely=0.3,anchor = NE,relwidth=0.28,relheight=0.6)
-    tablex.lift()
-    tree = ttk.Treeview(root)
-    tablex1=ttk.Treeview(heigh=10,columns=("#0","#1","#2","#3"))
-    tablex1.column("#0",width = 50)
-    tablex1.column("#1",width = 100)
-    tablex1.column("#2",width = 100)
-    tablex1.column("#3",width = 100)
-    tablex1.column("#4",width = 70)
-    tablex1.heading('#0',text='Id')
-    tablex1.heading('#1',text='LATITUDE')
-    tablex1.heading('#2',text='LONGITUDE')
-    tablex1.heading('#3',text='Date')
-    tablex1.heading('#4',text='Time')
-
-
-
-    for i in range(len(rows2)):
-         tablex1.insert("",i,text=i,values=(rows2[i][0],rows2[i][1],rows2[i][3],rows2[i][2]))
-
-
-    vsb = ttk.Scrollbar(tablex1, orient="vertical", command=tablex1.yview)
-    vsb.pack(side='right', fill='y')
-    tree.configure(yscrollcommand=vsb.set)
-
-    tablex1.place(relx = 0.9,rely=0.3,anchor = NE,relwidth=0.28,relheight=0.6)
-
-def common_Latitude11(tm1,tm2):			#displaying common latitude data
-    conn=sqlite3.connect("test1.db")
-    cur=conn.cursor()
-    cur.execute("SELECT * FROM t WHERE t.Latitude BETWEEN \'%s\' AND \'%s\'"  %(tm1,tm2))
-    rows1=cur.fetchall()
-    cur.execute("SELECT * FROM t1 WHERE t1.Latitude BETWEEN \'%s\' AND \'%s\'"  %(tm1,tm2))
-    rows2=cur.fetchall()
-    conn.close()
-    tree = ttk.Treeview(root)
-    tablex=ttk.Treeview(heigh=10,columns=("#0","#1","#2","#3"))
-    tablex.column("#0",width = 50)
-    tablex.column("#1",width = 100)
-    tablex.column("#2",width = 100)
-    tablex.column("#3",width = 100)
-    tablex.column("#4",width = 70)
-    tablex.heading('#0',text='Id')
-    tablex.heading('#1',text='LATITUDE')
-    tablex.heading('#2',text='LONGITUDE')
-    tablex.heading('#3',text='Dates')
-    tablex.heading('#4',text='Time')
-
-
-
-    for i in range(len(rows1)):
-         tablex.insert("",i,text=i,values=(rows1[i][0],rows1[i][1],rows1[i][3],rows1[i][2]))
-
-
-    vsb = ttk.Scrollbar(tablex, orient="vertical", command=tablex.yview)
-    vsb.pack(side='right', fill='y')
-    tree.configure(yscrollcommand=vsb.set)
-
-    tablex.place(relx = 0.36,rely=0.3,anchor = NE,relwidth=0.28,relheight=0.6)
-    tablex.lift()
-    tree = ttk.Treeview(root)
-    tablex1=ttk.Treeview(heigh=10,columns=("#0","#1","#2","#3"))
-    tablex1.column("#0",width = 50)
-    tablex1.column("#1",width = 100)
-    tablex1.column("#2",width = 100)
-    tablex1.column("#3",width = 100)
-    tablex1.column("#4",width = 70)
-    tablex1.heading('#0',text='Id')
-    tablex1.heading('#1',text='LATITUDE')
-    tablex1.heading('#2',text='LONGITUDE')
-    tablex1.heading('#3',text='Date')
-    tablex1.heading('#4',text='Time')
-
-
-
-    for i in range(len(rows2)):
-         tablex1.insert("",i,text=i,values=(rows2[i][0],rows2[i][1],rows2[i][3],rows2[i][2]))
-
-
-    vsb = ttk.Scrollbar(tablex1, orient="vertical", command=tablex1.yview)
-    vsb.pack(side='right', fill='y')
-    tree.configure(yscrollcommand=vsb.set)
-
-    tablex1.place(relx = 0.9,rely=0.3,anchor = NE,relwidth=0.28,relheight=0.6)
-
-
-
-#Browsing multiple file  and their buttions
-root.geometry('700x600')
-browsebutton = Button(root, text="Browse", command=browsefunc,justify="left")
-browsebutton.place(relx = 0.7,rely=0.026,relwidth=0.12)
-
-browsebutton1 = Button(root, text="Browse", command=browsefunc1)
-browsebutton1.place(relx = 0.7,rely=0.086,relwidth=0.12)
-
-pathlabel = Label(root)
-#All features of tool
-tkvar = StringVar(root)
-choices = sorted({'ALL','DATE', 'LATITUDE', 'LONGITUDE',"Particular Date","Particular Latitude","Particular Longitude","Date Range","Latitude Range","Longitude Range"})
-tkvar.set('Select Compare Option')
-
-popupMenu = OptionMenu(root, tkvar, *choices)
-
-l1=Label(root, text="Please select compare feature")
-l1.config(font = ("Courier bold",9))
-l1.place(relx=.05, rely=.15)
-
-popupMenu.place(relx=.05, rely=.2)
-num3 = Entry(root)                              		#User input for specific compare type
-Label(root, text="START").place(relx=.28, rely=.15)
-num3.place(relx = 0.38,rely=0.2, relwidth = 0.1,anchor = NE)
-
-num4 = Entry(root)					#User input for range compare type
-Label(root, text="END").place(relx=.48, rely=.15)
-num4.place(relx = 0.58,rely=0.2, relwidth = 0.1,anchor = NE)
-
-#Creating a dropdown file list for selection of the compare feature
-def change_dropdown(*args):
-    global dropdown
-    dropdown = str(tkvar.get())
-
-    if tkvar.get() == 'ALL':
-        common()
-    if tkvar.get() == "LONGITUDE":
-        common_Latitude()
-    if tkvar.get() == 'LATITUDE':
-        common_Latitude()
-    if tkvar.get() == "DATE":
-        common_Date()
-    if tkvar.get() == "Particular Latitude":
-        s=num3.get()
-        common_Latitude1(s)
-    if tkvar.get() == "Particular Longitude":
-        s=num3.get()
-        common_Longitude1(s)
-    if tkvar.get() == "Particular Date":
-        s=num3.get()
-        common_Date1(s)
-    if tkvar.get() == "Date Range":
-        s=num3.get()
-        s1=num4.get()
-        common_date11(s,s1)
-    if tkvar.get() == "Latitude Range":
-        s=num3.get()
-        s1=num4.get()
-        common_Latitude11(s,s1)
-    if tkvar.get() == "Longitude Range":
-        s=num3.get()
-        s1=num4.get()
-        common_Longitude11(s,s1)
-
-
-# link function to change dropdown
-tkvar.trace('w', change_dropdown)
-
-#Deleting the database, if created
-mainloop()
-try:
-    os.remove("test1.db")
-except:
-    print("No File")
-try:
-    os.remove("test1.db")
-except:
-    print("No File")
+center(root)
+ff = BrowseFiles(root)
+pack(ff)
+root.mainloop()
